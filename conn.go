@@ -18,6 +18,9 @@ type Notifty struct {
 
 	// NotifyKindVoteResponse
 	VoteAgreed bool
+
+	// NotifyKindFollowerPong
+	PingOK bool
 }
 
 type IConn interface {

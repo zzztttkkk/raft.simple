@@ -2,9 +2,13 @@ module github.com/zzztttkkk/raft.simple
 
 go 1.26.4
 
+require go.etcd.io/bbolt v1.4.3
+
 require (
-	github.com/google/uuid v1.6.0
-	github.com/mattn/go-sqlite3 v1.14.45 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
-	golang.org/x/sys v0.29.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/tools v0.46.0 // indirect
 )
+
+tool golang.org/x/tools/cmd/stringer

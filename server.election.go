@@ -14,8 +14,9 @@ func (server *Server) do_election() {
 		server.lock.Unlock()
 		return
 	}
-	if server.last_leader_notify.Load() == server.term {
-		server.last_leader_notify.Store(-1)
+	// prevent election if leader is alive
+	if server.last_leader_ping != nil && server.last_leader_ping.ok(server) {
+		server.last_leader_ping = nil
 		server.lock.Unlock()
 		return
 	}
@@ -60,7 +61,7 @@ func (server *Server) on_vote_request(conn IConn, notify *Notifty) {
 
 	term := server.term
 	version := server.store.Version()
-	if notify.Term < term || notify.Version < version {
+	if notify.Term < term || (notify.Term == term && notify.Version < version) {
 		slog.Info("got a vote request from a old server 🤣", slog.String("conn", conn.Info()))
 		server._send_vote_response(conn, term, version, false)
 		return
@@ -130,8 +131,9 @@ func (server *Server) on_vote_response(conn IConn, notify *Notifty) {
 }
 
 func (server *Server) election_loop() {
+	n := server.cfg.ElectionMaxStep - server.cfg.ElectionMinStep
 	for {
-		time.Sleep(time.Millisecond * time.Duration(rand.IntN(500)+120))
+		time.Sleep(time.Millisecond * time.Duration(rand.IntN(int(n))+int(server.cfg.ElectionMinStep)))
 		server.do_election()
 	}
 }
