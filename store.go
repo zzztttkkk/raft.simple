@@ -7,6 +7,11 @@ import (
 	"sync"
 )
 
+type Option[T any] struct {
+	V     T
+	Valid bool
+}
+
 type OpKind int
 
 const (
@@ -15,7 +20,7 @@ const (
 	OpKindDel
 )
 
-type OpResult sql.Null[struct {
+type OpResult Option[struct {
 	err    error
 	val    []byte
 	hasval bool
@@ -127,7 +132,8 @@ func ReleaseOps(ops ...*Op) {
 
 type IAppendOnlyStore interface {
 	Version() int64
+	Has(ctx context.Context, version int64) (bool, error)
+	SetVersion(v int64) error
 	View(ctx context.Context, ops ...*Op) error
 	Update(ctx context.Context, ops ...*Op) (int64, error)
-	ApplyWithVersion(ctx context.Context, version int64, ops ...*Op) error
 }

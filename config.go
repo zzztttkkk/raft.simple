@@ -6,9 +6,9 @@ type Machine struct {
 }
 
 type Config struct {
-	Machines           []Machine `json:"machines"`
-	ElectionMinStep    int       `json:"election_min_step"`
-	ElectionMaxStep    int       `json:"election_max_step"`
-	LeaderPingStep     int       `json:"leader_ping_step"`
-	LeaderPingTimeoput int       `json:"leader_ping_timeout"`
+	Machines          []Machine `json:"machines"`
+	ElectionMinStep   int       `json:"election_min_step"`
+	ElectionMaxStep   int       `json:"election_max_step"`
+	LeaderPingStep    int       `json:"leader_ping_step"`
+	LeaderPingTimeout int       `json:"leader_ping_timeout"`
 }

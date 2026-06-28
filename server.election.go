@@ -4,13 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"slices"
+	"sync"
 	"time"
 )
 
-func (server *Server) do_election() {
+func (server *Server) do_election(timeouts time.Duration) {
 	server.lock.Lock()
-	if server.role == RoleLeader {
+	if server._role == RoleLeader {
 		server.lock.Unlock()
 		return
 	}
@@ -20,33 +20,47 @@ func (server *Server) do_election() {
 		server.lock.Unlock()
 		return
 	}
-	server.role = RoleCandidate
+	server._change_role_in_lock(RoleCandidate, "do election")
 	server.term++
 	term := server.term
 	version := server.store.Version()
-	server.vote_state = map[int]struct{}{}
+	server.vote_began_at = time.Now()
+	server.vote_wait_timeout = timeouts
+	server.vote_state = map[string]struct{}{}
 	// prevent vote another
 	server.last_voted_term = term
+	server.last_voted_for_conn = nil
+
+	conns := server._conns_copy_in_lock()
+
 	server.lock.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*150)
-	defer cancel()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeouts)
+		defer cancel()
 
-	for _, conn := range server.conns {
-		go func() {
-			err := conn.Notify(ctx, &Notifty{Kind: NotifyKindCandidateVoteRequest, Term: term, Version: version})
-			if err != nil {
-				slog.Error("send vote request failed", slog.Any("err", err), slog.String("conn", conn.Info()))
-			}
-		}()
-	}
+		var wg sync.WaitGroup
+		wg.Add(len(conns))
+
+		for _, conn := range conns {
+			go func() {
+				defer wg.Done()
+				err := conn.Notify(ctx, &Notify{Kind: NotifyKindCandidateVoteRequest, Term: term, Version: version})
+				if err != nil {
+					slog.Error("send vote request failed", slog.Any("err", err), slog.String("conn", conn.Info()))
+				}
+			}()
+		}
+
+		wg.Wait()
+	}()
 }
 
 func (server *Server) _send_vote_response(conn IConn, term int64, version int64, agreed bool) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*50)
 		defer cancel()
-		err := conn.Notify(ctx, &Notifty{
+		err := conn.Notify(ctx, &Notify{
 			Kind: NotifyKindVoteResponse, Term: term, Version: version, VoteAgreed: agreed,
 		})
 		if err != nil {
@@ -55,7 +69,7 @@ func (server *Server) _send_vote_response(conn IConn, term int64, version int64,
 	}()
 }
 
-func (server *Server) on_vote_request(conn IConn, notify *Notifty) {
+func (server *Server) on_vote_request(conn IConn, notify *Notify) {
 	server.lock.Lock()
 	defer server.lock.Unlock()
 
@@ -67,7 +81,7 @@ func (server *Server) on_vote_request(conn IConn, notify *Notifty) {
 		return
 	}
 	if notify.Term > term {
-		server.on_new_term(conn, notify.Term)
+		server.on_new_term_in_lock(conn, notify.Term)
 		term = notify.Term
 	}
 	if notify.Term == server.last_voted_term && conn != server.last_voted_for_conn {
@@ -76,6 +90,7 @@ func (server *Server) on_vote_request(conn IConn, notify *Notifty) {
 			slog.String("request conn", conn.Info()),
 			slog.String("voted conn", server.last_voted_for_conn.Info()),
 		)
+		server._send_vote_response(conn, term, version, false)
 		return
 	}
 	server.last_voted_term = notify.Term
@@ -84,18 +99,18 @@ func (server *Server) on_vote_request(conn IConn, notify *Notifty) {
 	server._send_vote_response(conn, term, version, true)
 }
 
-func (server *Server) on_vote_response(conn IConn, notify *Notifty) {
+func (server *Server) on_vote_response(conn IConn, notify *Notify) {
 	server.lock.Lock()
 	defer server.lock.Unlock()
 
 	if !notify.VoteAgreed {
 		if notify.Term > server.term {
-			server.on_new_term(conn, notify.Term)
+			server.on_new_term_in_lock(conn, notify.Term)
 		}
 		return
 	}
 
-	if server.role != RoleCandidate {
+	if server._role != RoleCandidate {
 		slog.Info(
 			"got a vote response, but i'm not a candidate 😭",
 			slog.String("conn", conn.Info()),
@@ -105,7 +120,7 @@ func (server *Server) on_vote_response(conn IConn, notify *Notifty) {
 	}
 	if notify.Term != server.term {
 		if notify.Term > server.term {
-			server.on_new_term(conn, notify.Term)
+			server.on_new_term_in_lock(conn, notify.Term)
 			return
 		}
 		slog.Info(
@@ -117,23 +132,31 @@ func (server *Server) on_vote_response(conn IConn, notify *Notifty) {
 		return
 	}
 
-	idx := slices.Index(server.conns, conn)
-	if idx < 0 {
+	if time.Since(server.vote_began_at) > server.vote_wait_timeout {
+		slog.Info(
+			"got a timeouted vote response",
+			slog.String("conn", conn.Info()),
+		)
 		return
 	}
 
+	idx, ok := server.connmap[conn]
+	if !ok {
+		return
+	}
 	server.vote_state[idx] = struct{}{}
 	if len(server.vote_state)+1 < (int(server.machine_count)/2 + 1) {
 		return
 	}
-	server.role = RoleLeader
-	server.do_leader_ping_internal(server.term, server.store.Version())
+	server._change_role_in_lock(RoleLeader, "on vote response")
+	server.do_leader_ping_internal(server._conns_copy_in_lock(), server.term, server.store.Version())
 }
 
 func (server *Server) election_loop() {
 	n := server.cfg.ElectionMaxStep - server.cfg.ElectionMinStep
 	for {
-		time.Sleep(time.Millisecond * time.Duration(rand.IntN(int(n))+int(server.cfg.ElectionMinStep)))
-		server.do_election()
+		timeouts := time.Millisecond * time.Duration(rand.IntN(int(n))+int(server.cfg.ElectionMinStep))
+		server.do_election(timeouts)
+		time.Sleep(timeouts + time.Millisecond*time.Duration(rand.IntN(50)))
 	}
 }

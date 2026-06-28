@@ -11,7 +11,7 @@ const (
 	NotifyKindVoteResponse
 )
 
-type Notifty struct {
+type Notify struct {
 	Kind    NotifyKind
 	Term    int64
 	Version int64
@@ -25,5 +25,5 @@ type Notifty struct {
 
 type IConn interface {
 	Info() string
-	Notify(ctx context.Context, notify *Notifty) error
+	Notify(ctx context.Context, notify *Notify) error
 }
