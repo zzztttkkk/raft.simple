@@ -1,8 +1,7 @@
-package main
+package api
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"sync"
 )
@@ -20,22 +19,23 @@ const (
 	OpKindDel
 )
 
-type OpResult Option[struct {
+type OpResult struct {
+	idx    int
 	err    error
 	val    []byte
 	hasval bool
-}]
+}
 
 var (
-	ErrPendingOp      = errors.New("pending op")
 	ErrNilResultBytes = errors.New("nil result bytes")
 )
 
+func (result *OpResult) Index() int {
+	return result.idx
+}
+
 func (result *OpResult) Error() error {
-	if !result.Valid {
-		return ErrPendingOp
-	}
-	return result.V.err
+	return result.err
 }
 
 func (result *OpResult) Bytes() ([]byte, error) {
@@ -43,29 +43,35 @@ func (result *OpResult) Bytes() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !result.V.hasval {
+	if !result.hasval {
 		return nil, ErrNilResultBytes
 	}
-	return result.V.val, nil
+	return result.val, nil
 }
 
 type Op struct {
 	kind   OpKind
 	bucket string
 	key    string
-	val    sql.Null[[]byte]
+	val    Option[[]byte]
 	local  bool
-
-	Result OpResult
 }
 
 var (
 	oppool = sync.Pool{
 		New: func() any {
 			return &Op{
-				val: sql.Null[[]byte]{
+				val: Option[[]byte]{
 					V: make([]byte, 0, 4096),
 				},
+			}
+		},
+	}
+
+	resultpool = sync.Pool{
+		New: func() any {
+			return &OpResult{
+				val: make([]byte, 0, 4096),
 			}
 		},
 	}
@@ -116,24 +122,53 @@ func ReleaseOps(ops ...*Op) {
 				op.val.V = op.val.V[:0]
 			}
 		}
-		if op.Result.Valid {
-			op.Result.Valid = false
-			op.Result.V.err = nil
-			op.Result.V.hasval = false
-			if cap(op.Result.V.val) > 1024*1024 {
-				op.Result.V.val = make([]byte, 0, 4096)
-			} else {
-				op.Result.V.val = op.Result.V.val[:0]
-			}
-		}
 		oppool.Put(op)
 	}
 }
 
+func NewValResult(idx int, val []byte) *OpResult {
+	obj := resultpool.Get().(*OpResult)
+	obj.idx = idx
+	obj.err = nil
+	obj.hasval = true
+	obj.val = append(obj.val, val...)
+	return obj
+}
+
+func NewErrResult(idx int, err error) *OpResult {
+	obj := resultpool.Get().(*OpResult)
+	obj.idx = idx
+	obj.err = err
+	obj.hasval = false
+	return obj
+}
+
+func ReleaseResults(results ...*OpResult) {
+	for _, v := range results {
+		v.err = nil
+		v.hasval = false
+		if cap(v.val) > 1024*1024 {
+			v.val = make([]byte, 0, 4096)
+		} else {
+			v.val = v.val[:0]
+		}
+		resultpool.Put(v)
+	}
+}
+
+type LogEntry struct {
+	Term    int64
+	Version int64
+	Ops     []*Op
+}
+
 type IAppendOnlyStore interface {
 	Version() int64
-	Has(ctx context.Context, version int64) (bool, error)
-	SetVersion(v int64) error
-	View(ctx context.Context, ops ...*Op) error
-	Update(ctx context.Context, ops ...*Op) (int64, error)
+	Has(ctx context.Context, term, version int64) (bool, error)
+
+	View(ctx context.Context, ops ...*Op) ([]*OpResult, error)
+	Export(ctx context.Context, begin int64, count int) ([]*LogEntry, error)
+
+	TruncateAfter(v int64) error
+	Update(ctx context.Context, term int64, ops ...*Op) (int64, []*OpResult, error)
 }

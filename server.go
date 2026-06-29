@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/zzztttkkk/raft.simple/api"
 )
 
 type Server struct {
@@ -16,7 +18,7 @@ type Server struct {
 
 	_role Role
 	term  int64
-	store IAppendOnlyStore
+	store api.IAppendOnlyStore
 
 	// candidate
 	vote_began_at     time.Time
@@ -30,8 +32,16 @@ type Server struct {
 	last_voted_for_conn  IConn
 
 	// leader
-	current_pong_term  int64
-	current_pong_state map[string]struct{}
+	current_pong_term   int64
+	current_pong_state  map[string]struct{}
+	current_sync_states map[string]*_FollowerSyncState
+}
+
+type _FollowerSyncState struct {
+	conn                 IConn
+	consistency_checking bool
+	max_same_version     int64
+	next_send_version    int64
 }
 
 func (server *Server) _conns_copy_in_lock() []IConn {
@@ -67,6 +77,7 @@ func (server *Server) _change_role_in_lock(newrole Role, reason string) {
 
 	server.current_pong_term = -1
 	clear(server.current_pong_state)
+	clear(server.current_sync_states)
 
 	// change role
 	prev := server._role
